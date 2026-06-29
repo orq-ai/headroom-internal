@@ -1,6 +1,7 @@
 """OpenAI Codex CLI MCP registrar.
 
-Codex stores MCP server config in ``~/.codex/config.toml`` as
+Codex stores MCP server config in ``$CODEX_HOME/config.toml`` when
+``CODEX_HOME`` is set, otherwise ``~/.codex/config.toml``, as
 ``[mcp_servers.<name>]`` tables (with optional ``[mcp_servers.<name>.env]``
 sub-tables). There is no general-purpose CLI for adding entries, so we
 edit the file in place — using marker-delimited blocks so we can
@@ -11,9 +12,12 @@ anything else the user has configured.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
+
+from headroom import fsutil
 
 from .base import MCPRegistrar, RegisterResult, RegisterStatus, ServerSpec
 
@@ -47,9 +51,13 @@ class CodexRegistrar(MCPRegistrar):
     display_name = "OpenAI Codex CLI"
 
     def __init__(self, *, home_dir: Path | None = None) -> None:
-        home = home_dir if home_dir is not None else Path.home()
-        self._codex_dir = home / ".codex"
-        self._config_file = home / ".codex" / "config.toml"
+        if home_dir is not None:
+            self._codex_dir = home_dir / ".codex"
+        elif os.environ.get("CODEX_HOME"):
+            self._codex_dir = Path(os.environ["CODEX_HOME"]).expanduser()
+        else:
+            self._codex_dir = Path.home() / ".codex"
+        self._config_file = self._codex_dir / "config.toml"
 
     # ------------------------------------------------------------------
     # MCPRegistrar interface
@@ -126,7 +134,7 @@ class CodexRegistrar(MCPRegistrar):
         else:
             new_content = (before or after).rstrip("\n") + ("\n" if (before or after) else "")
         try:
-            self._config_file.write_text(new_content)
+            fsutil.write_text(self._config_file, new_content)
         except OSError:
             return False
         return True
@@ -139,17 +147,16 @@ class CodexRegistrar(MCPRegistrar):
         if not self._config_file.exists():
             return {}
         try:
-            with open(self._config_file, "rb") as f:
-                data = tomllib.load(f)
+            # Read via fsutil (UTF-8 with locale fallback) so a config that a
+            # tool wrote in the system locale (e.g. GBK) still parses instead
+            # of failing tomllib's UTF-8 requirement. See #733.
+            data = tomllib.loads(fsutil.read_text(self._config_file))
         except (tomllib.TOMLDecodeError, OSError):
             return {}
         return data if isinstance(data, dict) else {}
 
     def _read_text(self) -> str:
-        try:
-            return self._config_file.read_text()
-        except OSError:
-            return ""
+        return fsutil.read_text(self._config_file, default="")
 
     def _write_block(self, spec: ServerSpec) -> RegisterResult:
         block = _render_block(spec)
@@ -172,7 +179,7 @@ class CodexRegistrar(MCPRegistrar):
                 content = content.rstrip("\n") + "\n\n" + block + "\n"
             else:
                 content = block + "\n"
-            self._config_file.write_text(content)
+            fsutil.write_text(self._config_file, content)
         except OSError as exc:
             return RegisterResult(
                 RegisterStatus.FAILED, f"could not write {self._config_file}: {exc}"
