@@ -1,10 +1,13 @@
 # GPU-enabled image for headroom-ai.
 #
 # Base: python:3.12-slim (NO CUDA base image). torch and its CUDA runtime come
-# from the cu126 (CUDA 12.6) PyTorch wheels pinned in uv.lock via pyproject
-# [tool.uv.sources]; the nvidia-*-cu12 wheels bundle libcudart/cuDNN/cuBLAS under
-# site-packages/nvidia/*, and onnxruntime-gpu (<1.27) lazy-loads those same cu12
-# libs at session create. The GPU driver is injected at runtime by the NVIDIA
+# from the cu126 (CUDA 12.6) PyTorch wheels, routed at build time by pyproject's
+# [[tool.uv.index]] + [tool.uv.sources] (this image installs via `uv pip install`,
+# which re-resolves from pyproject — it does NOT read uv.lock; the lock is guarded
+# independently by the CI lock-guard job, and the build-time `+cu126` assert below
+# is the image's own backstop). The nvidia-*-cu12 wheels bundle libcudart/cuDNN/
+# cuBLAS under site-packages/nvidia/*, and onnxruntime-gpu (<1.27) lazy-loads those
+# same cu12 libs at session create. The GPU driver is injected at runtime by the NVIDIA
 # Container Toolkit. cu126 (not cu128) because the upstream `torch>=2.12.1` CVE
 # pin needs torch 2.12.x, which cu128 (caps at 2.11) can't supply; cu126 is the
 # only CUDA-12 channel carrying 2.12.x. Covers T4 (sm_75); not Blackwell (sm_120).
