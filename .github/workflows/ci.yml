@@ -70,6 +70,18 @@ jobs:
             workflows:
               - '.github/workflows/**'
 
+  lock-guard:
+    # Fails the PR if a re-lock drifts torch off cu126 (CUDA 12.6) or pulls the
+    # CUDA-13 stack. No deps needed — tomllib is stdlib. Cheap, always runs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PY_VERSION }}
+      - run: python scripts/verify_cu126_lock.py uv.lock
+
   lint:
     needs: changes
     if: needs.changes.outputs.code == 'true'
