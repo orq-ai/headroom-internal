@@ -1,6 +1,14 @@
 # GPU-enabled image for headroom-ai.
 #
-# Base: NVIDIA CUDA 12.4.1 + cuDNN 9 runtime on Ubuntu 22.04.
+# Base: python:3.12-slim (NO CUDA base image). torch and its CUDA runtime come
+# from the cu126 (CUDA 12.6) PyTorch wheels pinned in uv.lock via pyproject
+# [tool.uv.sources]; the nvidia-*-cu12 wheels bundle libcudart/cuDNN/cuBLAS under
+# site-packages/nvidia/*, and onnxruntime-gpu (<1.27) lazy-loads those same cu12
+# libs at session create. The GPU driver is injected at runtime by the NVIDIA
+# Container Toolkit. cu126 (not cu128) because the upstream `torch>=2.12.1` CVE
+# pin needs torch 2.12.x, which cu128 (caps at 2.11) can't supply; cu126 is the
+# only CUDA-12 channel carrying 2.12.x. Covers T4 (sm_75); not Blackwell (sm_120).
+#
 # Includes the full ML extra set (torch, sentence-transformers, SigLIP,
 # fastembed, onnxruntime-gpu) plus the SmartCrusher Rust extension
 # (`headroom._core`) so JSON compression actually runs.
@@ -24,21 +32,19 @@
 #    needs pkg-config + libssl-dev.
 # 6. With [ml], we bake HF weights and set TRANSFORMERS_OFFLINE so the
 #    proxy never reaches out at runtime.
-# 7. Multi-stage: builder has full toolchain (Rust, gcc, dev headers);
-#    runtime carries only Python + CUDA/cuDNN libs + installed wheels.
+# 7. Multi-stage: builder has full toolchain (Rust, gcc); runtime carries
+#    only Python + the installed wheels (which include the CUDA libs).
+# 8. python:3.12-slim ships CPython with its dev headers under
+#    /usr/local/include/python3.12, so the PyO3/maturin build needs no
+#    separate python3-dev. Packages install to site-packages (not the
+#    Ubuntu dist-packages split).
 
-# CUDA 12.6.3 + Ubuntu 24.04 ships python3.12 in main repos — avoids the
-# deadsnakes PPA entirely (the python3.11 path on jammy hit launchpad
-# SSL/connection failures during build).
-ARG CUDA_VERSION=12.6.3
-ARG UBUNTU_VERSION=24.04
 ARG PYTHON_VERSION=3.12
 ARG UV_VERSION=0.6.17
 
 # ---------- Stage 1: builder ----------
-FROM nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-ubuntu${UBUNTU_VERSION} AS builder
+FROM python:${PYTHON_VERSION}-slim AS builder
 
-ARG PYTHON_VERSION
 ARG UV_VERSION
 # Default extras enable: SmartCrusher (always, via Rust ext), CCR
 # (magika; in [proxy]), Kompress GPU compression ([ml]), AST code
@@ -55,11 +61,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     HF_HOME=/opt/hf-cache
 
-# Apt retry config for flaky networks (deadsnakes / launchpad).
 RUN echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries && \
     echo 'Acquire::http::Timeout "30";' >> /etc/apt/apt.conf.d/80-retries && \
     echo 'Acquire::ForceIPv4 "true";' >> /etc/apt/apt.conf.d/80-retries
 
+# Build toolchain only — slim already provides python + headers. esaxx-rs needs
+# g++; openssl-sys needs pkg-config + libssl-dev.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
@@ -69,14 +76,7 @@ RUN apt-get update && \
         g++ \
         libc6-dev \
         pkg-config \
-        libssl-dev \
-        python${PYTHON_VERSION} \
-        python${PYTHON_VERSION}-dev \
-        python${PYTHON_VERSION}-venv \
-        python3-pip && \
-    ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python && \
-    ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python3 && \
-    rm -f /usr/lib/python${PYTHON_VERSION}/EXTERNALLY-MANAGED && \
+        libssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Rust toolchain. The repo pins via rust-toolchain.toml (1.95.0); install
@@ -93,6 +93,9 @@ WORKDIR /build
 COPY pyproject.toml uv.lock README.md Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 RUN mkdir -p headroom && touch headroom/__init__.py
+# uv pip install reads pyproject's [[tool.uv.index]] + [tool.uv.sources], so
+# torch resolves from the cu126 index (linux). The build-time assert below is
+# the hard backstop if that ever regresses.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system ".[${HEADROOM_EXTRAS}]"
 
@@ -100,13 +103,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system "tree-sitter-language-pack>=0.10.0,<1.6.3"
 
-# Replace CPU onnxruntime with CUDA build.
+# Replace CPU onnxruntime with the CUDA build.
 # Pin <1.27: onnxruntime-gpu 1.27.0 made libcudart.so.13 a hard import-time
 # dep but stopped declaring any nvidia-* wheels, so a fresh install fails to
-# import ("ImportError: libcudart.so.13"). 1.26.0 imports standalone and
-# lazy-loads CUDA at session create (torch's nvidia/cu13 wheels provide it).
-# Remove the upper bound once a 1.27+ release re-declares nvidia-* wheels (or
-# the base image moves to CUDA 13); re-test a fresh GPU build before doing so.
+# import ("ImportError: libcudart.so.13"). 1.26.x imports standalone and
+# lazy-loads CUDA at session create from torch's bundled nvidia-*-cu12 wheels
+# (libcudart.so.12). Both torch and ORT are CUDA 12 here, so this stays pinned.
+# Revisit only if the channel moves to cu13 + onnxruntime-gpu>=1.27.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip uninstall --system onnxruntime || true && \
     uv pip install --system "onnxruntime-gpu>=1.19.0,<1.27"
@@ -163,15 +166,20 @@ print('Kompress baked, backend=', KompressCompressor().preload())" ); then \
 
 # Build-time verification: fail fast on silent install issues.
 # cd to /tmp so the local /build/headroom/ source dir doesn't shadow the
-# installed package (which is the one carrying _core.so).
+# installed package (which is the one carrying _core.so). Asserts the cu126
+# CUDA build resolved (hard backstop for the lock pin) and that the
+# onnxruntime-gpu CUDA EP is present.
 RUN cd /tmp && python -c "\
 import headroom._core; \
 import torch; \
 import onnxruntime as ort; \
 import tree_sitter_language_pack as tslp; \
+assert torch.version.cuda is not None, 'torch is NOT CUDA-enabled — lock drifted off cu126'; \
+assert torch.version.cuda.startswith('12.6'), 'expected CUDA 12.6, got ' + str(torch.version.cuda); \
+assert '+cu126' in torch.__version__, 'expected +cu126 build, got ' + torch.__version__; \
 assert 'CUDAExecutionProvider' in ort.get_available_providers(), 'onnxruntime-gpu missing CUDA EP'; \
 assert hasattr(tslp, 'get_language'), 'tslp API broken (1.6.3 rename?)'; \
-print('verify OK: torch', torch.__version__, '| ort providers', ort.get_available_providers()); \
+print('verify OK: torch', torch.__version__, 'CUDA', torch.version.cuda, '| ort', ort.get_available_providers()); \
 "
 
 # Verify Kompress actually COMPRESSES under the exact offline env the runtime
@@ -191,7 +199,7 @@ print('Kompress offline OK:', len(src), '->', len(out.compressed)); \
     fi
 
 # ---------- Stage 2: runtime ----------
-FROM nvidia/cuda:${CUDA_VERSION}-cudnn-runtime-ubuntu${UBUNTU_VERSION} AS runtime
+FROM python:${PYTHON_VERSION}-slim AS runtime
 
 ARG PYTHON_VERSION
 
@@ -207,32 +215,26 @@ RUN echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries && \
     echo 'Acquire::http::Timeout "30";' >> /etc/apt/apt.conf.d/80-retries && \
     echo 'Acquire::ForceIPv4 "true";' >> /etc/apt/apt.conf.d/80-retries
 
-# Runtime needs only python + curl (healthcheck). Drop toolchain/dev libs.
+# Runtime needs curl (healthcheck) + libgomp1 (torch CPU ops link libgomp.so.1).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
-        python${PYTHON_VERSION} \
-        python${PYTHON_VERSION}-venv && \
-    ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python && \
-    ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python3 && \
-    rm -f /usr/lib/python${PYTHON_VERSION}/EXTERNALLY-MANAGED && \
+        libgomp1 && \
     rm -rf /var/lib/apt/lists/*
 
-# Ubuntu 24.04 ships with a default `ubuntu` user at uid/gid 1000. Drop
-# it BEFORE the COPYs so --chown lands in the same layer as the data
-# (a separate `chown -R` later would duplicate the data into a new
-# layer — that bug added 3.75 GB to the previous build).
-RUN userdel -r ubuntu 2>/dev/null || true && \
-    groupadd --gid 1000 nonroot && \
+# Create the unprivileged runtime user BEFORE the COPYs so --chown lands in the
+# same layer as the data (a separate `chown -R` later duplicates the data into a
+# new layer).
+RUN groupadd --gid 1000 nonroot && \
     useradd --uid 1000 --gid nonroot --create-home nonroot && \
     mkdir -p /home/nonroot/.headroom /data && \
     chown -R nonroot:nonroot /home/nonroot /data
 
-# Copy installed Python packages, headroom CLI, and baked HF cache.
-# HF cache is chown'd in-place to avoid the duplicate-layer bug.
-COPY --from=builder /usr/local/lib/python${PYTHON_VERSION}/dist-packages /usr/local/lib/python${PYTHON_VERSION}/dist-packages
-COPY --from=builder /usr/lib/python3/dist-packages /usr/lib/python3/dist-packages
+# Copy installed Python packages (incl. the bundled nvidia-*-cu12 CUDA libs),
+# the headroom CLI, and the baked HF cache. slim installs to site-packages
+# (single dir), not the Ubuntu dist-packages split.
+COPY --from=builder /usr/local/lib/python${PYTHON_VERSION}/site-packages /usr/local/lib/python${PYTHON_VERSION}/site-packages
 COPY --from=builder /usr/local/bin/headroom /usr/local/bin/headroom
 COPY --from=builder --chown=nonroot:nonroot /opt/hf-cache /opt/hf-cache
 

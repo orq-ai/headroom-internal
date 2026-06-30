@@ -337,6 +337,21 @@ name = "pypi"
 url = "https://pypi.org/simple/"
 default = true
 
+# CUDA channel. cu126 = CUDA 12.6 — the only CUDA-12 PyTorch index that carries
+# torch 2.12.x (cu128 caps at 2.11; the upstream `torch>=2.12.1` floor is a CVE
+# remediation pin we keep). Without this, PyPI torch on linux drags the CUDA-13
+# nvidia-*-cu13 stack, which mismatches the onnxruntime-gpu<1.27 (libcudart.so.12)
+# pin. explicit=true → only torch (via [tool.uv.sources]) resolves here.
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+# linux-only: cu126 has no darwin wheels, so an unconditional source would break
+# `uv lock` on macOS. The [pytorch-mps] darwin extra keeps the PyPI (MPS) build.
+torch = [{ index = "pytorch-cu126", marker = "sys_platform == 'linux'" }]
+
 [tool.maturin]
 # Where the Python package lives. With `python-source = "."` and the
 # package directory `headroom/` at repo root, maturin includes every file
