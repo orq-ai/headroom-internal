@@ -89,8 +89,9 @@ variable:
 
 | Value               | Behavior                                                               |
 |---------------------|------------------------------------------------------------------------|
-| `auto`              | Default. ONNX CPU first (stable, lightweight), PyTorch as fallback.    |
+| `auto`              | Default. ONNX on GPU if the CUDA provider is present, else ONNX CPU; PyTorch as fallback. |
 | `onnx` / `onnx_cpu` | Force ONNX Runtime on CPU.                                             |
+| `onnx_cuda`         | Force ONNX Runtime CUDA provider (fp32 artifact, CPU fallback). Needs `onnxruntime-gpu` + a CUDA device; degrades to CPU otherwise. |
 | `onnx_coreml`       | Force ONNX Runtime with the CoreML provider (CPU fallback).            |
 | `pytorch`           | Force PyTorch with automatic device selection (CUDA → MPS → CPU).      |
 | `pytorch_mps`       | Force PyTorch on Apple-Silicon MPS; falls back to ONNX CPU on failure. |
@@ -99,6 +100,8 @@ Values are case-insensitive and hyphens are accepted (`onnx-cpu` ==
 `onnx_cpu`). Shorthand aliases: `cpu` → `onnx_cpu`, `coreml` →
 `onnx_coreml`, `mps` / `torch_mps` → `pytorch_mps`, `torch` →
 `pytorch`. Unrecognized values log a warning and fall back to `auto`.
+Set `HEADROOM_KOMPRESS_CUDA_DEVICE` to pick the GPU ordinal for `onnx_cuda`
+(default `0`).
 
 Example — opt in to MPS on an Apple-Silicon machine:
 
