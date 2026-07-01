@@ -140,17 +140,21 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 # resolves HF_MODEL_ID and the transitive tokenizer (answerdotai/ModernBERT-base)
 # straight from source, so a future upstream model bump can't leave this
 # Dockerfile baking a stale model — the exact silent no-op this guards against.
-# It also pulls only the first loadable ONNX artifact (int8-wo, ~261MB), not
-# every variant. Pin the ONNX backend so the baked set (onnx weights + tokenizer)
-# is provably sufficient and the PyTorch fallback — which would need un-baked
-# ModernBERT weights — can never fire offline. cd /tmp so the /build/headroom/
-# source tree doesn't shadow the installed package carrying _core.so.
-# Fails the build (exit 1) if weights can't be fetched after 3 attempts, rather
-# than shipping an image that silently no-ops at runtime.
+# Bake the FP32 artifact (~601MB), not int8-wo: fp32 runs on BOTH the CUDA EP and
+# CPU, so this one file serves the GPU default (auto→onnx_cuda) and any CPU
+# fallback. int8-wo's MatMulNBits contrib op has no CUDA kernel — on GPU it would
+# silently run that node on CPU — and the fp32-CPU control benchmarked no slower
+# than int8-CPU, so there is no reason to also bake int8 here. Forcing the exact
+# filename (HEADROOM_KOMPRESS_ONNX_FILENAME) makes the baked set provably fp32 and
+# keeps the PyTorch fallback — which would need un-baked ModernBERT weights — from
+# ever firing offline. cd /tmp so the /build/headroom/ source tree doesn't shadow
+# the installed package carrying _core.so. Fails the build (exit 1) if weights
+# can't be fetched after 3 attempts, rather than shipping a silent-no-op image.
 RUN if echo ",${HEADROOM_EXTRAS}," | grep -q ",ml,"; then \
         ok=0; \
         for i in 1 2 3; do \
-            if ( cd /tmp && HEADROOM_KOMPRESS_BACKEND=onnx python -c "\
+            if ( cd /tmp && HEADROOM_KOMPRESS_BACKEND=onnx \
+                 HEADROOM_KOMPRESS_ONNX_FILENAME=onnx/kompress-fp32.onnx python -c "\
 from headroom.transforms.kompress_compressor import KompressCompressor; \
 print('Kompress baked, backend=', KompressCompressor().preload())" ); then \
                 ok=1; \
@@ -191,7 +195,9 @@ print('verify OK: torch', torch.__version__, 'CUDA', torch.version.cuda, '| ort'
 # failure instead of a latent prod no-op.
 RUN if echo ",${HEADROOM_EXTRAS}," | grep -q ",ml,"; then \
         cd /tmp && TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1 \
-        HEADROOM_KOMPRESS_BACKEND=onnx HF_HOME=/opt/hf-cache python -c "\
+        HEADROOM_KOMPRESS_BACKEND=onnx \
+        HEADROOM_KOMPRESS_ONNX_FILENAME=onnx/kompress-fp32.onnx \
+        HF_HOME=/opt/hf-cache python -c "\
 from headroom.transforms.kompress_compressor import KompressCompressor; \
 src='The quick brown fox jumps over the lazy dog. ' * 40; \
 out=KompressCompressor().compress(src); \
@@ -212,7 +218,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HEADROOM_HOST=0.0.0.0 \
     HF_HOME=/opt/hf-cache \
     TRANSFORMERS_OFFLINE=1 \
-    HEADROOM_KOMPRESS_BACKEND=onnx
+    HEADROOM_KOMPRESS_BACKEND=auto \
+    HEADROOM_KOMPRESS_ONNX_FILENAME=onnx/kompress-fp32.onnx
 
 RUN echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries && \
     echo 'Acquire::http::Timeout "30";' >> /etc/apt/apt.conf.d/80-retries && \

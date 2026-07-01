@@ -161,7 +161,7 @@ def _selected_backend() -> KompressBackend:
     return backend  # type: ignore[return-value]
 
 
-def _env_int(name: str) -> int | None:
+def _env_int(name: str, *, min_value: int = 1) -> int | None:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
         return None
@@ -170,8 +170,8 @@ def _env_int(name: str) -> int | None:
     except ValueError:
         logger.warning("%s must be an integer, got %r; ignoring", name, raw)
         return None
-    if value <= 0:
-        logger.warning("%s must be positive, got %r; ignoring", name, raw)
+    if value < min_value:
+        logger.warning("%s must be >= %d, got %r; ignoring", name, min_value, raw)
         return None
     return value
 
@@ -429,12 +429,22 @@ def _onnx_filename_candidates(*, prefer_fp32: bool = False) -> tuple[str, ...]:
 
 
 def _onnx_cuda_available() -> bool:
-    """True when onnxruntime exposes the CUDA execution provider on this host."""
+    """True when onnxruntime exposes the CUDA execution provider on this host.
+
+    Distinguishes "onnxruntime not installed" (benign, silent) from "installed
+    but failed to enumerate providers" (a real install problem) — otherwise the
+    ``auto`` path collapses to CPU with no clue why.
+    """
     try:
         import onnxruntime as ort
-
+    except ImportError:
+        return False
+    try:
         return "CUDAExecutionProvider" in ort.get_available_providers()
     except Exception:
+        logger.warning(
+            "onnxruntime failed to enumerate providers; assuming no CUDA", exc_info=True
+        )
         return False
 
 
@@ -444,8 +454,12 @@ def _create_onnx_session(
     *,
     allow_download: bool = True,
     prefer_fp32: bool = False,
-) -> Any:
+) -> tuple[Any, str]:
     """Resolve and load the model's ONNX artifact, trying candidates in order.
+
+    Returns ``(session, loaded_filename)`` — the filename lets the caller tell
+    which artifact actually loaded (e.g. the CUDA path warns if it fell through
+    from fp32 to the int8-wo artifact, whose MatMulNBits op silently runs on CPU).
 
     A candidate is skipped on download miss (file not in the repo) or on
     session-load failure (e.g. the weight-only int8 artifact uses the
@@ -476,11 +490,12 @@ def _create_onnx_session(
 
             ort = onnxruntime
         try:
-            return ort.InferenceSession(
+            session = ort.InferenceSession(
                 onnx_path,
                 _onnx_session_options(ort),
                 providers=providers,
             )
+            return session, filename
         except Exception as exc:
             last_err = exc
             logger.warning(
@@ -552,9 +567,9 @@ def _load_kompress_onnx(
                 "CPUExecutionProvider",
             ]
         elif provider == "cuda":
-            # device 0 is the default; _env_int rejects 0 (treats it as unset),
-            # which lands on 0 anyway — the common case needs no env var.
-            device_id = _env_int(KOMPRESS_CUDA_DEVICE_ENV) or 0
+            # 0 is a valid ordinal (default GPU), so allow it — min_value=0 keeps
+            # an explicit device 0 from tripping the "ignoring" warning.
+            device_id = _env_int(KOMPRESS_CUDA_DEVICE_ENV, min_value=0) or 0
             providers = [
                 ("CUDAExecutionProvider", {"device_id": device_id}),
                 "CPUExecutionProvider",
@@ -562,13 +577,27 @@ def _load_kompress_onnx(
         else:
             providers = ["CPUExecutionProvider"]
 
-        session = _create_onnx_session(
+        session, loaded_filename = _create_onnx_session(
             model_id, providers, allow_download=allow_download, prefer_fp32=prefer_fp32
         )
-        if provider == "cuda" and "CUDAExecutionProvider" not in session.get_providers():
-            logger.warning(
-                "onnx_cuda session fell back to CPU providers: %s", session.get_providers()
-            )
+        if provider == "cuda":
+            # Two distinct silent-CPU traps, neither caught by the other:
+            #  - EP absent: CUDA not in the session's provider list at all.
+            #  - Wrong artifact: fp32 was a cache miss and we fell through to
+            #    int8-wo, whose MatMulNBits contrib op has no CUDA kernel, so it
+            #    runs per-node on the CPU fallback while CUDA still lists as a
+            #    provider (get_providers() can't see this — hence the filename check).
+            if "CUDAExecutionProvider" not in session.get_providers():
+                logger.warning(
+                    "onnx_cuda session fell back to CPU providers: %s", session.get_providers()
+                )
+            elif loaded_filename != _ONNX_FP32_FILENAME:
+                logger.warning(
+                    "onnx_cuda loaded non-fp32 artifact %r: its MatMulNBits op has no "
+                    "CUDA kernel and will run on CPU. Cache/bake %r for real GPU execution.",
+                    loaded_filename,
+                    _ONNX_FP32_FILENAME,
+                )
         model = _OnnxModel(session)
 
         from transformers import AutoTokenizer

@@ -259,7 +259,7 @@ class TestKompressBackendSelection:
         def fake_session(model_id, providers, *, allow_download=True, prefer_fp32=False):
             seen["providers"] = providers
             seen["prefer_fp32"] = prefer_fp32
-            return SimpleNamespace(get_providers=lambda: ["CPUExecutionProvider"])
+            return SimpleNamespace(get_providers=lambda: ["CPUExecutionProvider"]), "onnx/model.onnx"
 
         monkeypatch.setattr(kmod, "_create_onnx_session", fake_session)
         monkeypatch.setattr(kmod, "_OnnxModel", lambda session: "model")
@@ -287,7 +287,7 @@ class TestKompressBackendSelection:
             seen["prefer_fp32"] = prefer_fp32
             return SimpleNamespace(
                 get_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            )
+            ), kmod._ONNX_FP32_FILENAME
 
         monkeypatch.setattr(kmod, "_create_onnx_session", fake_session)
         monkeypatch.setattr(kmod, "_OnnxModel", lambda session: "model")
@@ -303,6 +303,75 @@ class TestKompressBackendSelection:
         ]
         assert seen["prefer_fp32"] is True
         assert backend == "onnx_cuda"
+
+    def test_cuda_device_ordinal_from_env(self, monkeypatch) -> None:
+        """HEADROOM_KOMPRESS_CUDA_DEVICE picks a non-zero GPU ordinal."""
+        import headroom.transforms.kompress_compressor as kmod
+
+        seen: dict[str, object] = {}
+        monkeypatch.setenv("HEADROOM_KOMPRESS_CUDA_DEVICE", "1")
+        monkeypatch.setattr(kmod, "_kompress_cache", {})
+        monkeypatch.setattr(kmod, "_onnx_cuda_available", lambda: True)
+
+        def fake_session(model_id, providers, *, allow_download=True, prefer_fp32=False):
+            seen["providers"] = providers
+            return SimpleNamespace(
+                get_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            ), kmod._ONNX_FP32_FILENAME
+
+        monkeypatch.setattr(kmod, "_create_onnx_session", fake_session)
+        monkeypatch.setattr(kmod, "_OnnxModel", lambda session: "model")
+        monkeypatch.setattr(kmod, "_load_modernbert_tokenizer", lambda *a, **k: "tokenizer")
+
+        kmod._load_kompress_onnx("org/model", provider="cuda")
+        assert seen["providers"][0] == ("CUDAExecutionProvider", {"device_id": 1})
+
+    def test_cuda_warns_when_session_falls_back_to_cpu(self, monkeypatch, caplog) -> None:
+        """CUDA EP available but the session comes back CPU-only → loud warning."""
+        import logging
+
+        import headroom.transforms.kompress_compressor as kmod
+
+        monkeypatch.setattr(kmod, "_kompress_cache", {})
+        monkeypatch.setattr(kmod, "_onnx_cuda_available", lambda: True)
+
+        def fake_session(model_id, providers, *, allow_download=True, prefer_fp32=False):
+            # Provider requested but silently dropped (the ldconfig/lib-path prod bug).
+            return SimpleNamespace(get_providers=lambda: ["CPUExecutionProvider"]), kmod._ONNX_FP32_FILENAME
+
+        monkeypatch.setattr(kmod, "_create_onnx_session", fake_session)
+        monkeypatch.setattr(kmod, "_OnnxModel", lambda session: "model")
+        monkeypatch.setattr(kmod, "_load_modernbert_tokenizer", lambda *a, **k: "tokenizer")
+
+        with caplog.at_level(logging.WARNING):
+            _, _, backend = kmod._load_kompress_onnx("org/model", provider="cuda")
+
+        assert backend == "onnx_cuda"  # label unchanged even though inference is CPU
+        assert any("fell back to CPU providers" in r.message for r in caplog.records)
+
+    def test_cuda_warns_when_loaded_artifact_not_fp32(self, monkeypatch, caplog) -> None:
+        """CUDA EP present but fp32 missed → int8 loaded → MatMulNBits runs on CPU."""
+        import logging
+
+        import headroom.transforms.kompress_compressor as kmod
+
+        monkeypatch.setattr(kmod, "_kompress_cache", {})
+        monkeypatch.setattr(kmod, "_onnx_cuda_available", lambda: True)
+
+        def fake_session(model_id, providers, *, allow_download=True, prefer_fp32=False):
+            # CUDA registered, but fp32 was a cache miss so int8-wo loaded instead.
+            return SimpleNamespace(
+                get_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            ), "onnx/model_quantized.onnx"
+
+        monkeypatch.setattr(kmod, "_create_onnx_session", fake_session)
+        monkeypatch.setattr(kmod, "_OnnxModel", lambda session: "model")
+        monkeypatch.setattr(kmod, "_load_modernbert_tokenizer", lambda *a, **k: "tokenizer")
+
+        with caplog.at_level(logging.WARNING):
+            kmod._load_kompress_onnx("org/model", provider="cuda")
+
+        assert any("MatMulNBits" in r.message for r in caplog.records)
 
     def test_onnx_cuda_uses_batched_path(self, monkeypatch) -> None:
         """onnx_cuda must take the GPU batch path, unlike onnx CPU."""
