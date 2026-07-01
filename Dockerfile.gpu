@@ -241,6 +241,15 @@ COPY --from=builder /usr/local/lib/python${PYTHON_VERSION}/site-packages /usr/lo
 COPY --from=builder /usr/local/bin/headroom /usr/local/bin/headroom
 COPY --from=builder --chown=nonroot:nonroot /opt/hf-cache /opt/hf-cache
 
+# onnxruntime-gpu loads its cu12 / cuDNN9 runtime libs from the bundled
+# nvidia-*-cu12 wheels, but those lib dirs are not on the default loader path.
+# Without registering them the ONNX CUDA execution provider fails to instantiate
+# and silently falls back to CPU (get_providers() still lists it). Register them
+# in the ld.so cache — must run as root, before the USER switch.
+RUN printf '%s\n' /usr/local/lib/python${PYTHON_VERSION}/site-packages/nvidia/*/lib \
+        > /etc/ld.so.conf.d/nvidia-cu12.conf && \
+    ldconfig
+
 USER nonroot
 WORKDIR /home/nonroot
 

@@ -81,6 +81,9 @@ class TestKompressBackendSelection:
         monkeypatch.setenv("HEADROOM_KOMPRESS_BACKEND", "cpu")
         assert kmod._selected_backend() == "onnx_cpu"
 
+        monkeypatch.setenv("HEADROOM_KOMPRESS_BACKEND", "onnx_cuda")
+        assert kmod._selected_backend() == "onnx_cuda"
+
         monkeypatch.setenv("HEADROOM_KOMPRESS_BACKEND", "unknown")
         assert kmod._selected_backend() == "auto"
 
@@ -128,45 +131,83 @@ class TestKompressBackendSelection:
     def test_forced_coreml_backend_uses_onnx_coreml(self, monkeypatch) -> None:
         import headroom.transforms.kompress_compressor as kmod
 
-        calls: list[tuple[str, bool]] = []
+        calls: list[tuple[str, str]] = []
         monkeypatch.setenv("HEADROOM_KOMPRESS_BACKEND", "onnx_coreml")
         monkeypatch.setattr(kmod, "_kompress_cache", {})
         monkeypatch.setattr(
             kmod,
             "_load_kompress_onnx",
-            lambda model_id, *, use_coreml=False, allow_download=True: (
-                calls.append((model_id, use_coreml)) or ("model", "tokenizer", "onnx_coreml")
+            lambda model_id, *, provider="cpu", allow_download=True: (
+                calls.append((model_id, provider)) or ("model", "tokenizer", "onnx_coreml")
             ),
         )
 
         assert kmod._load_kompress("model-b") == ("model", "tokenizer", "onnx_coreml")
-        assert calls == [("model-b", True)]
+        assert calls == [("model-b", "coreml")]
+
+    def test_forced_onnx_cuda_backend_uses_cuda_provider(self, monkeypatch) -> None:
+        import headroom.transforms.kompress_compressor as kmod
+
+        calls: list[tuple[str, str]] = []
+        monkeypatch.setenv("HEADROOM_KOMPRESS_BACKEND", "onnx_cuda")
+        monkeypatch.setattr(kmod, "_kompress_cache", {})
+        monkeypatch.setattr(
+            kmod,
+            "_load_kompress_onnx",
+            lambda model_id, *, provider="cpu", allow_download=True: (
+                calls.append((model_id, provider)) or ("model", "tokenizer", "onnx_cuda")
+            ),
+        )
+
+        assert kmod._load_kompress("model-cuda") == ("model", "tokenizer", "onnx_cuda")
+        assert calls == [("model-cuda", "cuda")]
 
     def test_auto_backend_preserves_onnx_first(self, monkeypatch) -> None:
         import headroom.transforms.kompress_compressor as kmod
 
-        calls: list[str] = []
+        calls: list[tuple[str, str]] = []
         monkeypatch.delenv("HEADROOM_KOMPRESS_BACKEND", raising=False)
         monkeypatch.setattr(kmod, "_kompress_cache", {})
         monkeypatch.setattr(kmod, "_is_onnx_available", lambda: True)
         monkeypatch.setattr(kmod, "_is_pytorch_available", lambda: True)
+        monkeypatch.setattr(kmod, "_onnx_cuda_available", lambda: False)
         monkeypatch.setattr(
             kmod,
             "_load_kompress_onnx",
-            lambda model_id, *, use_coreml=False, allow_download=True: (
-                calls.append("onnx") or ("model", "tokenizer", "onnx")
+            lambda model_id, *, provider="cpu", allow_download=True: (
+                calls.append(("onnx", provider)) or ("model", "tokenizer", "onnx")
             ),
         )
         monkeypatch.setattr(
             kmod,
             "_load_kompress_pytorch",
             lambda model_id, device, *, allow_download=True: (
-                calls.append("pytorch") or ("model", "tokenizer", "pytorch")
+                calls.append(("pytorch", device)) or ("model", "tokenizer", "pytorch")
             ),
         )
 
         assert kmod._load_kompress("model-c") == ("model", "tokenizer", "onnx")
-        assert calls == ["onnx"]
+        assert calls == [("onnx", "cpu")]
+
+    def test_auto_backend_uses_cuda_when_gpu_present(self, monkeypatch) -> None:
+        import headroom.transforms.kompress_compressor as kmod
+
+        calls: list[tuple[str, str]] = []
+        monkeypatch.delenv("HEADROOM_KOMPRESS_BACKEND", raising=False)
+        monkeypatch.setattr(kmod, "_kompress_cache", {})
+        monkeypatch.setattr(kmod, "_is_onnx_available", lambda: True)
+        monkeypatch.setattr(kmod, "_is_pytorch_available", lambda: True)
+        monkeypatch.setattr(kmod, "_onnx_cuda_available", lambda: True)
+        monkeypatch.setattr(
+            kmod,
+            "_load_kompress_onnx",
+            lambda model_id, *, provider="cpu", allow_download=True: (
+                calls.append(("onnx", provider)) or ("model", "tokenizer", "onnx_cuda")
+            ),
+        )
+
+        assert kmod._load_kompress("model-d") == ("model", "tokenizer", "onnx_cuda")
+        assert calls == [("onnx", "cuda")]
 
     def test_onnx_session_options_read_thread_caps(self, monkeypatch) -> None:
         import headroom.transforms.kompress_compressor as kmod
@@ -192,6 +233,99 @@ class TestKompressBackendSelection:
         assert options.inter_op_num_threads == 1
         assert options.enable_cpu_mem_arena is False
         assert options.enable_mem_pattern is False
+
+    def test_onnx_filename_candidates_prefer_fp32(self, monkeypatch) -> None:
+        import headroom.transforms.kompress_compressor as kmod
+
+        monkeypatch.delenv("HEADROOM_KOMPRESS_ONNX_FILENAME", raising=False)
+        candidates = kmod._onnx_filename_candidates(prefer_fp32=True)
+        assert candidates[0] == kmod._ONNX_FP32_FILENAME
+        # All defaults still present (just reordered).
+        assert set(candidates) == set(kmod._DEFAULT_ONNX_FILENAMES)
+
+    def test_onnx_filename_candidates_default_order_unchanged(self, monkeypatch) -> None:
+        import headroom.transforms.kompress_compressor as kmod
+
+        monkeypatch.delenv("HEADROOM_KOMPRESS_ONNX_FILENAME", raising=False)
+        assert kmod._onnx_filename_candidates() == kmod._DEFAULT_ONNX_FILENAMES
+
+    def test_cuda_provider_falls_back_to_cpu_when_unavailable(self, monkeypatch) -> None:
+        import headroom.transforms.kompress_compressor as kmod
+
+        seen: dict[str, object] = {}
+        monkeypatch.setattr(kmod, "_kompress_cache", {})
+        monkeypatch.setattr(kmod, "_onnx_cuda_available", lambda: False)
+
+        def fake_session(model_id, providers, *, allow_download=True, prefer_fp32=False):
+            seen["providers"] = providers
+            seen["prefer_fp32"] = prefer_fp32
+            return SimpleNamespace(get_providers=lambda: ["CPUExecutionProvider"])
+
+        monkeypatch.setattr(kmod, "_create_onnx_session", fake_session)
+        monkeypatch.setattr(kmod, "_OnnxModel", lambda session: "model")
+        monkeypatch.setattr(
+            kmod, "_load_modernbert_tokenizer", lambda *a, **k: "tokenizer"
+        )
+
+        _, _, backend = kmod._load_kompress_onnx("org/model", provider="cuda")
+
+        # Degraded to CPU: providers are CPU-only, fp32 preference dropped, label onnx.
+        assert seen["providers"] == ["CPUExecutionProvider"]
+        assert seen["prefer_fp32"] is False
+        assert backend == "onnx"
+
+    def test_cuda_provider_builds_cuda_list_when_available(self, monkeypatch) -> None:
+        import headroom.transforms.kompress_compressor as kmod
+
+        seen: dict[str, object] = {}
+        monkeypatch.delenv("HEADROOM_KOMPRESS_CUDA_DEVICE", raising=False)
+        monkeypatch.setattr(kmod, "_kompress_cache", {})
+        monkeypatch.setattr(kmod, "_onnx_cuda_available", lambda: True)
+
+        def fake_session(model_id, providers, *, allow_download=True, prefer_fp32=False):
+            seen["providers"] = providers
+            seen["prefer_fp32"] = prefer_fp32
+            return SimpleNamespace(
+                get_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            )
+
+        monkeypatch.setattr(kmod, "_create_onnx_session", fake_session)
+        monkeypatch.setattr(kmod, "_OnnxModel", lambda session: "model")
+        monkeypatch.setattr(
+            kmod, "_load_modernbert_tokenizer", lambda *a, **k: "tokenizer"
+        )
+
+        _, _, backend = kmod._load_kompress_onnx("org/model", provider="cuda")
+
+        assert seen["providers"] == [
+            ("CUDAExecutionProvider", {"device_id": 0}),
+            "CPUExecutionProvider",
+        ]
+        assert seen["prefer_fp32"] is True
+        assert backend == "onnx_cuda"
+
+    def test_onnx_cuda_uses_batched_path(self, monkeypatch) -> None:
+        """onnx_cuda must take the GPU batch path, unlike onnx CPU."""
+        import headroom.transforms.kompress_compressor as kmod
+        from headroom.transforms.kompress_compressor import KompressCompressor
+
+        compressor = KompressCompressor()
+
+        # Single-content batching: enabled for onnx_cuda, not for onnx CPU.
+        assert compressor._should_batch_single_content(object(), "onnx_cuda") is True
+        assert compressor._should_batch_single_content(object(), "onnx") is False
+        assert compressor._should_batch_single_content(object(), "onnx_coreml") is False
+
+        # Sequential-fallback: onnx_cuda batches (False), onnx CPU/CoreML don't (True).
+        monkeypatch.setattr(kmod, "_kompress_cache", {"m": ("model", "tok", "onnx_cuda")})
+        compressor.config.model_id = "m"
+        assert compressor._should_use_sequential_fallback() is False
+
+        monkeypatch.setattr(kmod, "_kompress_cache", {"m": ("model", "tok", "onnx")})
+        assert compressor._should_use_sequential_fallback() is True
+
+        monkeypatch.setattr(kmod, "_kompress_cache", {"m": ("model", "tok", "onnx_coreml")})
+        assert compressor._should_use_sequential_fallback() is True
 
 
 # ── KompressResult ──────────────────────────────────────────────────────
