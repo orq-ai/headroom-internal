@@ -7,7 +7,7 @@
 
 Added an opt-in `onnx_cuda` Kompress backend (ONNX Runtime CUDA execution provider,
 fp32 artifact) and benchmarked single-request `compress()` latency against ONNX-CPU
-and PyTorch-GPU. **`onnx_cuda` is the fastest and lightest option — 9–47× faster than
+and PyTorch-GPU. **`onnx_cuda` is the fastest and lightest option — ~8–47× faster than
 CPU and 1.5–1.9× faster than PyTorch-GPU** — so `auto` prefers it whenever a CUDA
 device is present. Response speed was the goal; this is the headline number a caller
 feels per compress call.

@@ -105,9 +105,11 @@ DOCKER_BUILDKIT=1 docker build -f Dockerfile.gpu \
   --secret id=hf_token,src=$HOME/.cache/huggingface/token \
   -t headroom:cu126-bench .
 ```
-Expected: build succeeds. `Dockerfile.gpu` already asserts the CUDA EP is present
-at build time, so a successful build guarantees `CUDAExecutionProvider` — no
-separate provider check needed.
+Expected: build succeeds. `Dockerfile.gpu` asserts `CUDAExecutionProvider` is in
+`ort.get_available_providers()` at build time, so a successful build guarantees the
+provider is *compiled in* — NOT that it instantiates on GPU at runtime (see Runtime
+finding #1: the provider can list yet silently run on CPU). Runtime GPU execution is
+verified separately by the benchmark's provider + nvitop checks.
 
 - [ ] **Step 2: Pre-download the fp32 artifact into the host HF cache**
 
@@ -245,14 +247,16 @@ the fastest option AND the lightest (no torch import at runtime). No revert need
 
 ### Two runtime findings (the hard-fail guards earned their keep)
 
-1. **`Dockerfile.gpu` needs `LD_LIBRARY_PATH` for the ONNX CUDA EP (real prod gap).**
-   onnxruntime-gpu 1.26 can't locate the cu12/cuDNN9 libs (in
+1. **`Dockerfile.gpu` needs the cu12 lib dirs on the loader path for the ONNX CUDA EP
+   (real prod gap).** onnxruntime-gpu 1.26 can't locate the cu12/cuDNN9 libs (in
    `site-packages/nvidia/*/lib`) at runtime, so it silently falls back to CPU — the
    prior "ORT CUDA session init" validation was a false positive (session created,
-   ran CPU). onnx_cuda only hit GPU with
-   `LD_LIBRARY_PATH=$(ls -d …/nvidia/*/lib | tr '\n' :)` set. **Fix: add
-   `ENV LD_LIBRARY_PATH=…` to the Dockerfile.gpu runtime stage, or `auto`→onnx_cuda
-   silently runs CPU in prod.**
+   ran CPU). While debugging, `LD_LIBRARY_PATH=$(ls -d …/nvidia/*/lib | tr '\n' :)`
+   confirmed the fix. **Shipped fix: register those dirs in the ld.so cache — write
+   `/etc/ld.so.conf.d/nvidia-cu12.conf` + `ldconfig` as root before the `USER` switch
+   (Dockerfile.gpu runtime stage). Without it, `auto`→onnx_cuda silently runs CPU in
+   prod.** (`ldconfig` over `ENV LD_LIBRARY_PATH` — persists in the image, no per-run
+   env needed.)
 2. **pytorch bench needed `-e USER=<name>` (benchmark quirk, not a prod bug).**
    Under `--user <uid>` with no `/etc/passwd` entry, torch's `getpass.getuser()`
    raised `KeyError: uid not found` while importing `torch._dynamo` (pulled in by
