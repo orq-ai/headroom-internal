@@ -84,8 +84,9 @@ def test_load_kompress_auto_does_not_pytorch_download_on_cache_miss(monkeypatch)
     monkeypatch.setattr(kc, "_selected_backend", lambda: "auto")
     monkeypatch.setattr(kc, "_is_onnx_available", lambda: True)
     monkeypatch.setattr(kc, "_is_pytorch_available", lambda: True)
+    monkeypatch.setattr(kc, "_onnx_cuda_available", lambda: False)
 
-    def onnx_not_cached(model_id, *, use_coreml=False, allow_download=True):
+    def onnx_not_cached(model_id, *, provider="cpu", allow_download=True):
         raise KompressModelNotCached(model_id)
 
     def pytorch_should_not_run(*args, **kwargs):

@@ -93,10 +93,13 @@ _DEFAULT_ONNX_FILENAMES = (
 KOMPRESS_ONNX_INTRA_THREADS_ENV = "HEADROOM_KOMPRESS_ONNX_INTRA_THREADS"
 KOMPRESS_ONNX_INTER_THREADS_ENV = "HEADROOM_KOMPRESS_ONNX_INTER_THREADS"
 KOMPRESS_COREML_CACHE_DIR_ENV = "HEADROOM_KOMPRESS_COREML_CACHE_DIR"
+KOMPRESS_CUDA_DEVICE_ENV = "HEADROOM_KOMPRESS_CUDA_DEVICE"
 KOMPRESS_MAX_CONCURRENT_ENV = "HEADROOM_KOMPRESS_MAX_CONCURRENT"
 KOMPRESS_BATCH_SIZE_ENV = "HEADROOM_KOMPRESS_BATCH_SIZE"
 
-KompressBackend = Literal["auto", "onnx", "onnx_cpu", "onnx_coreml", "pytorch", "pytorch_mps"]
+KompressBackend = Literal[
+    "auto", "onnx", "onnx_cpu", "onnx_cuda", "onnx_coreml", "pytorch", "pytorch_mps"
+]
 
 # HuggingFace local-lookup errors that mean "asset not in cache" rather than a
 # genuine failure. Caught when loading cache-only so startup can defer instead.
@@ -140,6 +143,7 @@ def _selected_backend() -> KompressBackend:
         "torch_mps": "pytorch_mps",
         "onnx": "onnx",
         "onnx_cpu": "onnx_cpu",
+        "onnx_cuda": "onnx_cuda",
         "onnx_coreml": "onnx_coreml",
         "pytorch": "pytorch",
         "pytorch_mps": "pytorch_mps",
@@ -157,7 +161,7 @@ def _selected_backend() -> KompressBackend:
     return backend  # type: ignore[return-value]
 
 
-def _env_int(name: str) -> int | None:
+def _env_int(name: str, *, min_value: int = 1) -> int | None:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
         return None
@@ -166,8 +170,8 @@ def _env_int(name: str) -> int | None:
     except ValueError:
         logger.warning("%s must be an integer, got %r; ignoring", name, raw)
         return None
-    if value <= 0:
-        logger.warning("%s must be positive, got %r; ignoring", name, raw)
+    if value < min_value:
+        logger.warning("%s must be >= %d, got %r; ignoring", name, min_value, raw)
         return None
     return value
 
@@ -404,19 +408,58 @@ class _OnnxModel:
         return (np.array(scores) > 0.5).tolist()
 
 
-def _onnx_filename_candidates() -> tuple[str, ...]:
-    """ONNX repo paths to try, honoring an optional exact-file override."""
+_ONNX_FP32_FILENAME = "onnx/kompress-fp32.onnx"
+
+
+def _onnx_filename_candidates(*, prefer_fp32: bool = False) -> tuple[str, ...]:
+    """ONNX repo paths to try, honoring an optional exact-file override.
+
+    ``prefer_fp32`` moves the fp32 artifact to the front. The CUDA EP has no
+    kernel for the int8-wo artifact's MatMulNBits contrib op, so on GPU it would
+    silently run that node on the CPU fallback provider — defeating the point.
+    Loading fp32 first keeps the whole graph on the GPU.
+    """
     override = os.environ.get(KOMPRESS_ONNX_FILENAME_ENV, "").strip()
     if override:
         # Put the override first but keep the defaults as a safety net.
         return (override, *(f for f in _DEFAULT_ONNX_FILENAMES if f != override))
+    if prefer_fp32:
+        return (_ONNX_FP32_FILENAME, *(f for f in _DEFAULT_ONNX_FILENAMES if f != _ONNX_FP32_FILENAME))
     return _DEFAULT_ONNX_FILENAMES
 
 
+def _onnx_cuda_available() -> bool:
+    """True when onnxruntime exposes the CUDA execution provider on this host.
+
+    Distinguishes "onnxruntime not installed" (benign, silent) from "installed
+    but failed to enumerate providers" (a real install problem) — otherwise the
+    ``auto`` path collapses to CPU with no clue why.
+    """
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return False
+    try:
+        return "CUDAExecutionProvider" in ort.get_available_providers()
+    except Exception:
+        logger.warning(
+            "onnxruntime failed to enumerate providers; assuming no CUDA", exc_info=True
+        )
+        return False
+
+
 def _create_onnx_session(
-    model_id: str, providers: list[Any], *, allow_download: bool = True
-) -> Any:
+    model_id: str,
+    providers: list[Any],
+    *,
+    allow_download: bool = True,
+    prefer_fp32: bool = False,
+) -> tuple[Any, str]:
     """Resolve and load the model's ONNX artifact, trying candidates in order.
+
+    Returns ``(session, loaded_filename)`` — the filename lets the caller tell
+    which artifact actually loaded (e.g. the CUDA path warns if it fell through
+    from fp32 to the int8-wo artifact, whose MatMulNBits op silently runs on CPU).
 
     A candidate is skipped on download miss (file not in the repo) or on
     session-load failure (e.g. the weight-only int8 artifact uses the
@@ -431,7 +474,8 @@ def _create_onnx_session(
     last_err: Exception | None = None
     cache_miss = False
     ort: Any = None
-    for filename in _onnx_filename_candidates():
+    candidates = _onnx_filename_candidates(prefer_fp32=prefer_fp32)
+    for filename in candidates:
         try:
             onnx_path = hf_hub_download_local_first(
                 model_id, filename, allow_network=allow_download
@@ -446,11 +490,12 @@ def _create_onnx_session(
 
             ort = onnxruntime
         try:
-            return ort.InferenceSession(
+            session = ort.InferenceSession(
                 onnx_path,
                 _onnx_session_options(ort),
                 providers=providers,
             )
+            return session, filename
         except Exception as exc:
             last_err = exc
             logger.warning(
@@ -462,31 +507,44 @@ def _create_onnx_session(
     if not allow_download and cache_miss:
         raise KompressModelNotCached(model_id) from last_err
     raise FileNotFoundError(
-        f"No loadable ONNX artifact in {model_id}; tried {_onnx_filename_candidates()}"
+        f"No loadable ONNX artifact in {model_id}; tried {candidates}"
     ) from last_err
 
 
 def _load_kompress_onnx(
     model_id: str,
     *,
-    use_coreml: bool = False,
+    provider: str = "cpu",
     allow_download: bool = True,
 ) -> tuple[Any, Any, str]:
-    """Download ONNX INT8 model from HuggingFace and load with onnxruntime.
+    """Download ONNX model from HuggingFace and load with onnxruntime.
+
+    ``provider`` selects the execution provider: ``"cpu"`` (default),
+    ``"coreml"`` (Apple), or ``"cuda"`` (NVIDIA GPU). CUDA and CoreML keep a
+    ``CPUExecutionProvider`` fallback so unsupported nodes still run. A
+    ``"cuda"`` request on a host without the CUDA EP transparently degrades to
+    CPU.
 
     When ``allow_download`` is ``False`` the model and tokenizer are loaded from
     the local cache only; a cache miss raises :class:`KompressModelNotCached`
     instead of hitting the network.
     """
+    if provider == "cuda" and not _onnx_cuda_available():
+        logger.warning(
+            "onnx_cuda requested but CUDAExecutionProvider is unavailable; using CPU"
+        )
+        provider = "cpu"
+
     with _kompress_lock:
         if model_id in _kompress_cache:
             return _kompress_cache[model_id]
 
         logger.info("Downloading Kompress ONNX model from %s ...", model_id)
 
-        backend = "onnx_coreml" if use_coreml else "onnx"
+        backend = {"coreml": "onnx_coreml", "cuda": "onnx_cuda"}.get(provider, "onnx")
+        prefer_fp32 = provider == "cuda"
         providers: list[Any]
-        if use_coreml:
+        if provider == "coreml":
             from headroom import paths as _paths
 
             coreml_cache_dir = os.environ.get(KOMPRESS_COREML_CACHE_DIR_ENV, "").strip()
@@ -508,10 +566,38 @@ def _load_kompress_onnx(
                 ),
                 "CPUExecutionProvider",
             ]
+        elif provider == "cuda":
+            # 0 is a valid ordinal (default GPU), so allow it — min_value=0 keeps
+            # an explicit device 0 from tripping the "ignoring" warning.
+            device_id = _env_int(KOMPRESS_CUDA_DEVICE_ENV, min_value=0) or 0
+            providers = [
+                ("CUDAExecutionProvider", {"device_id": device_id}),
+                "CPUExecutionProvider",
+            ]
         else:
             providers = ["CPUExecutionProvider"]
 
-        session = _create_onnx_session(model_id, providers, allow_download=allow_download)
+        session, loaded_filename = _create_onnx_session(
+            model_id, providers, allow_download=allow_download, prefer_fp32=prefer_fp32
+        )
+        if provider == "cuda":
+            # Two distinct silent-CPU traps, neither caught by the other:
+            #  - EP absent: CUDA not in the session's provider list at all.
+            #  - Wrong artifact: fp32 was a cache miss and we fell through to
+            #    int8-wo, whose MatMulNBits contrib op has no CUDA kernel, so it
+            #    runs per-node on the CPU fallback while CUDA still lists as a
+            #    provider (get_providers() can't see this — hence the filename check).
+            if "CUDAExecutionProvider" not in session.get_providers():
+                logger.warning(
+                    "onnx_cuda session fell back to CPU providers: %s", session.get_providers()
+                )
+            elif loaded_filename != _ONNX_FP32_FILENAME:
+                logger.warning(
+                    "onnx_cuda loaded non-fp32 artifact %r: its MatMulNBits op has no "
+                    "CUDA kernel and will run on CPU. Cache/bake %r for real GPU execution.",
+                    loaded_filename,
+                    _ONNX_FP32_FILENAME,
+                )
         model = _OnnxModel(session)
 
         from transformers import AutoTokenizer
@@ -612,12 +698,14 @@ def _load_kompress(
 ) -> tuple[Any, Any, str]:
     """Load Kompress model, returns (model, tokenizer, backend).
 
-    The default keeps the historic behavior: try ONNX CPU first
-    (lightweight), then fall back to PyTorch. Operators can override via
-    HEADROOM_KOMPRESS_BACKEND:
+    The default tries ONNX first (lightweight), preferring the CUDA execution
+    provider when a GPU is present, else CPU, then falls back to PyTorch.
+    Operators can override via HEADROOM_KOMPRESS_BACKEND:
 
-    - auto: ONNX CPU first, then PyTorch.
+    - auto: ONNX on GPU if available else ONNX CPU, then PyTorch.
     - onnx / onnx_cpu: force ONNX CPU.
+    - onnx_cuda: force ONNX Runtime CUDA provider (fp32 artifact) with CPU
+      fallback; needs onnxruntime-gpu and a CUDA device.
     - onnx_coreml: force ONNX Runtime CoreML provider with CPU fallback.
     - pytorch: force PyTorch with the configured device.
     - pytorch_mps: force PyTorch on Apple's MPS backend.
@@ -633,10 +721,13 @@ def _load_kompress(
 
     backend = _selected_backend()
     if backend in ("onnx", "onnx_cpu"):
-        return _load_kompress_onnx(model_id, use_coreml=False, allow_download=allow_download)
+        return _load_kompress_onnx(model_id, provider="cpu", allow_download=allow_download)
+
+    if backend == "onnx_cuda":
+        return _load_kompress_onnx(model_id, provider="cuda", allow_download=allow_download)
 
     if backend == "onnx_coreml":
-        return _load_kompress_onnx(model_id, use_coreml=True, allow_download=allow_download)
+        return _load_kompress_onnx(model_id, provider="coreml", allow_download=allow_download)
 
     if backend in ("pytorch", "pytorch_mps"):
         forced_device = "mps" if backend == "pytorch_mps" else device
@@ -654,16 +745,18 @@ def _load_kompress(
             )
             if _is_onnx_available():
                 return _load_kompress_onnx(
-                    model_id, use_coreml=False, allow_download=allow_download
+                    model_id, provider="cpu", allow_download=allow_download
                 )
             return _load_kompress_pytorch(model_id, "cpu", allow_download=allow_download)
 
-    # Auto mode: preserve stable default behavior. This avoids changing
-    # compression quality/perf characteristics for existing installs while
-    # allowing opt-in MPS/CoreML experiments via HEADROOM_KOMPRESS_BACKEND.
+    # Auto mode: ONNX first, on GPU when the CUDA EP is present (fp32 artifact),
+    # else CPU. MPS/CoreML stay opt-in via HEADROOM_KOMPRESS_BACKEND.
     if _is_onnx_available():
+        auto_provider = "cuda" if _onnx_cuda_available() else "cpu"
         try:
-            return _load_kompress_onnx(model_id, use_coreml=False, allow_download=allow_download)
+            return _load_kompress_onnx(
+                model_id, provider=auto_provider, allow_download=allow_download
+            )
         except KompressModelNotCached:
             # Cache-only miss: don't trigger a PyTorch network download as a
             # fallback — propagate so the caller can defer.
@@ -910,7 +1003,7 @@ class KompressCompressor(Transform):
             model, tokenizer, backend = _load_kompress(
                 self.config.model_id, self.config.device, allow_download=allow_download
             )
-            is_onnx = backend == "onnx"
+            is_onnx = backend.startswith("onnx")
             device_type = _model_device_type(model, backend)
 
             if self._should_batch_single_content(model, backend):
@@ -1199,7 +1292,7 @@ class KompressCompressor(Transform):
                     results[i] = self._passthrough(contents[i], len(word_lists[i]))
             return [r for r in results if r is not None]
 
-        is_onnx = backend == "onnx"
+        is_onnx = backend.startswith("onnx")
         device_type = _model_device_type(model, backend)
         kept_ids_per_text: dict[int, set[int]] = {i: set() for i in range(n) if results[i] is None}
         inference_ms = 0.0
@@ -1340,6 +1433,8 @@ class KompressCompressor(Transform):
         return final
 
     def _should_batch_single_content(self, model: Any, backend: str) -> bool:
+        if backend == "onnx_cuda":
+            return True  # CUDA EP parallelizes the batch dim, like pytorch+cuda
         if backend != "pytorch":
             return False
         device_type = _model_device_type(model, backend)
@@ -1350,6 +1445,7 @@ class KompressCompressor(Transform):
 
         Empirically measured:
           - ONNX CPU: no batch-dim parallelism; batched is 0.7-0.9x vs sequential.
+          - ONNX CUDA: GPU parallelizes the batch dim — use batched path.
           - PyTorch CPU: typically similar (conservative fallback).
           - PyTorch + CUDA: 2.0-2.3x speedup at N>=3 — use batched path.
 
@@ -1368,8 +1464,10 @@ class KompressCompressor(Transform):
 
         model, _tokenizer, backend = _kompress_cache[model_id]
 
-        if backend == "onnx":
-            return True  # ONNX CPU provider doesn't parallelize batch dim
+        if backend == "onnx_cuda":
+            return False  # CUDA EP parallelizes the batch dim
+        if backend.startswith("onnx"):
+            return True  # ONNX CPU/CoreML providers don't parallelize batch dim
         if backend == "pytorch":
             try:
                 import torch
