@@ -2804,11 +2804,15 @@ variable:</p>
 <tbody>
 <tr>
 <td><code>auto</code></td>
-<td>Default. ONNX CPU first (stable, lightweight), PyTorch as fallback.</td>
+<td>Default. ONNX on GPU if the CUDA provider is present, else ONNX CPU; PyTorch as fallback.</td>
 </tr>
 <tr>
 <td><code>onnx</code> / <code>onnx_cpu</code></td>
 <td>Force ONNX Runtime on CPU.</td>
+</tr>
+<tr>
+<td><code>onnx_cuda</code></td>
+<td>Force ONNX Runtime CUDA provider (fp32 artifact, CPU fallback). Needs <code>onnxruntime-gpu</code> + a CUDA device; degrades to CPU otherwise.</td>
 </tr>
 <tr>
 <td><code>onnx_coreml</code></td>
@@ -2827,7 +2831,9 @@ variable:</p>
 <p>Values are case-insensitive and hyphens are accepted (<code>onnx-cpu</code> ==
 <code>onnx_cpu</code>). Shorthand aliases: <code>cpu</code> → <code>onnx_cpu</code>, <code>coreml</code> →
 <code>onnx_coreml</code>, <code>mps</code> / <code>torch_mps</code> → <code>pytorch_mps</code>, <code>torch</code> →
-<code>pytorch</code>. Unrecognized values log a warning and fall back to <code>auto</code>.</p>
+<code>pytorch</code>. Unrecognized values log a warning and fall back to <code>auto</code>.
+Set <code>HEADROOM_KOMPRESS_CUDA_DEVICE</code> to pick the GPU ordinal for <code>onnx_cuda</code>
+(default <code>0</code>).</p>
 <p>Example — opt in to MPS on an Apple-Silicon machine:</p>
 <div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">HEADROOM_KOMPRESS_BACKEND</span><span class="o">=</span>mps
 </span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>headroom<span class="w"> </span>proxy<span class="w"> </span>...
