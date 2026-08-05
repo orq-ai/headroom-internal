@@ -259,13 +259,13 @@ class TestKompressBackendSelection:
         def fake_session(model_id, providers, *, allow_download=True, prefer_fp32=False):
             seen["providers"] = providers
             seen["prefer_fp32"] = prefer_fp32
-            return SimpleNamespace(get_providers=lambda: ["CPUExecutionProvider"]), "onnx/model.onnx"
+            return SimpleNamespace(
+                get_providers=lambda: ["CPUExecutionProvider"]
+            ), "onnx/model.onnx"
 
         monkeypatch.setattr(kmod, "_create_onnx_session", fake_session)
         monkeypatch.setattr(kmod, "_OnnxModel", lambda session: "model")
-        monkeypatch.setattr(
-            kmod, "_load_modernbert_tokenizer", lambda *a, **k: "tokenizer"
-        )
+        monkeypatch.setattr(kmod, "_load_modernbert_tokenizer", lambda *a, **k: "tokenizer")
 
         _, _, backend = kmod._load_kompress_onnx("org/model", provider="cuda")
 
@@ -291,9 +291,7 @@ class TestKompressBackendSelection:
 
         monkeypatch.setattr(kmod, "_create_onnx_session", fake_session)
         monkeypatch.setattr(kmod, "_OnnxModel", lambda session: "model")
-        monkeypatch.setattr(
-            kmod, "_load_modernbert_tokenizer", lambda *a, **k: "tokenizer"
-        )
+        monkeypatch.setattr(kmod, "_load_modernbert_tokenizer", lambda *a, **k: "tokenizer")
 
         _, _, backend = kmod._load_kompress_onnx("org/model", provider="cuda")
 
@@ -337,7 +335,9 @@ class TestKompressBackendSelection:
 
         def fake_session(model_id, providers, *, allow_download=True, prefer_fp32=False):
             # Provider requested but silently dropped (the ldconfig/lib-path prod bug).
-            return SimpleNamespace(get_providers=lambda: ["CPUExecutionProvider"]), kmod._ONNX_FP32_FILENAME
+            return SimpleNamespace(
+                get_providers=lambda: ["CPUExecutionProvider"]
+            ), kmod._ONNX_FP32_FILENAME
 
         monkeypatch.setattr(kmod, "_create_onnx_session", fake_session)
         monkeypatch.setattr(kmod, "_OnnxModel", lambda session: "model")

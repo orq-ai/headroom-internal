@@ -21,6 +21,7 @@ stdlib-only (tomllib) so the CI lock-guard job needs no `uv sync` / pip install.
 
 import pathlib
 import sys
+
 import tomllib
 
 # The CVE floor that motivates cu126 (see module docstring). Bump alongside the
@@ -112,7 +113,9 @@ def main(argv: list[str]) -> None:
     if bad:
         fail(f"CUDA-13 packages present: {bad}")
 
-    print(f"OK: torch {version} from cu126 (>= {'.'.join(map(str, TORCH_FLOOR))}), no CUDA-13 packages")
+    print(
+        f"OK: torch {version} from cu126 (>= {'.'.join(map(str, TORCH_FLOOR))}), no CUDA-13 packages"
+    )
 
 
 if __name__ == "__main__":

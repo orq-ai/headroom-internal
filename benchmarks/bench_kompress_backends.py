@@ -92,7 +92,9 @@ def _assert_loaded(cfg: dict, model_id: str):
 
     session = getattr(model, "_session", None)
     providers = session.get_providers() if session and hasattr(session, "get_providers") else None
-    if cfg["backend"] == "onnx_cuda" and (not providers or "CUDAExecutionProvider" not in providers):
+    if cfg["backend"] == "onnx_cuda" and (
+        not providers or "CUDAExecutionProvider" not in providers
+    ):
         sys.exit(f"FAIL: onnx_cuda did not get the CUDA provider (providers={providers})")
 
     if cfg["device"] is not None:

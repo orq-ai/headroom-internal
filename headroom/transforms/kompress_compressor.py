@@ -424,7 +424,10 @@ def _onnx_filename_candidates(*, prefer_fp32: bool = False) -> tuple[str, ...]:
         # Put the override first but keep the defaults as a safety net.
         return (override, *(f for f in _DEFAULT_ONNX_FILENAMES if f != override))
     if prefer_fp32:
-        return (_ONNX_FP32_FILENAME, *(f for f in _DEFAULT_ONNX_FILENAMES if f != _ONNX_FP32_FILENAME))
+        return (
+            _ONNX_FP32_FILENAME,
+            *(f for f in _DEFAULT_ONNX_FILENAMES if f != _ONNX_FP32_FILENAME),
+        )
     return _DEFAULT_ONNX_FILENAMES
 
 
@@ -442,9 +445,7 @@ def _onnx_cuda_available() -> bool:
     try:
         return "CUDAExecutionProvider" in ort.get_available_providers()
     except Exception:
-        logger.warning(
-            "onnxruntime failed to enumerate providers; assuming no CUDA", exc_info=True
-        )
+        logger.warning("onnxruntime failed to enumerate providers; assuming no CUDA", exc_info=True)
         return False
 
 
@@ -530,9 +531,7 @@ def _load_kompress_onnx(
     instead of hitting the network.
     """
     if provider == "cuda" and not _onnx_cuda_available():
-        logger.warning(
-            "onnx_cuda requested but CUDAExecutionProvider is unavailable; using CPU"
-        )
+        logger.warning("onnx_cuda requested but CUDAExecutionProvider is unavailable; using CPU")
         provider = "cpu"
 
     with _kompress_lock:
@@ -744,9 +743,7 @@ def _load_kompress(
                 exc,
             )
             if _is_onnx_available():
-                return _load_kompress_onnx(
-                    model_id, provider="cpu", allow_download=allow_download
-                )
+                return _load_kompress_onnx(model_id, provider="cpu", allow_download=allow_download)
             return _load_kompress_pytorch(model_id, "cpu", allow_download=allow_download)
 
     # Auto mode: ONNX first, on GPU when the CUDA EP is present (fp32 artifact),
