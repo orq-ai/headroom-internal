@@ -45,7 +45,22 @@ class TestDeepSeekPricingModule:
     def test_registry_staleness_and_source_url(self):
         registry = get_deepseek_registry()
         assert registry.source_url == "https://api-docs.deepseek.com/quick_start/pricing"
-        assert not registry.is_stale()
+        # NOTE: no is_stale() assertion here — it compares LAST_UPDATED against
+        # date.today(), so it would spuriously fail 30 days after every pricing
+        # refresh regardless of code changes. Staleness logic is covered
+        # clock-independently by test_is_stale_uses_last_updated_age below.
+
+    def test_is_stale_uses_last_updated_age(self):
+        from datetime import date, timedelta
+
+        fresh = PricingRegistry(last_updated=date.today(), source_url="x")
+        assert not fresh.is_stale()
+        stale = PricingRegistry(
+            last_updated=date.today()
+            - timedelta(days=PricingRegistry.STALENESS_THRESHOLD_DAYS + 1),
+            source_url="x",
+        )
+        assert stale.is_stale()
 
     def test_deepseek_registry_estimate_cost(self):
         registry = get_deepseek_registry()
