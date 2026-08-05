@@ -54,6 +54,11 @@ jobs:
         uses: pypa/gh-action-pip-audit@v1.1.0
         with:
           inputs: requirements-prod.txt
+          # requirements-prod.txt is the full resolved closure from uv.lock, so
+          # skip the install/re-resolve pass. Avoids pip choking on the
+          # torch==*+cu126 local version (published only on the cu126 index,
+          # not PyPI), which otherwise fails the job before any audit runs.
+          no-deps: true
 
   # ---- SAST: CodeQL static analysis ------------------------------------
   codeql:
