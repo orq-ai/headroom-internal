@@ -313,7 +313,8 @@ jobs:
 
   test-agno:
     needs: [changes, build-wheel]
-    if: needs.changes.outputs.code == 'true'
+    # fork: dropped on internal (agno integration unused here)
+    if: github.repository != 'orq-ai/headroom-internal' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -339,7 +340,8 @@ jobs:
 
   test-dashboard-ui:
     needs: [changes, build-wheel]
-    if: needs.changes.outputs.code == 'true'
+    # fork: dropped on internal (dashboard UI unused here)
+    if: github.repository != 'orq-ai/headroom-internal' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -393,7 +395,8 @@ jobs:
 
   build:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # fork: dropped on internal (we deploy via Docker); still runs upstream
+    if: github.repository != 'orq-ai/headroom-internal' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -503,7 +506,8 @@ jobs:
 
   windows-native-wrapper:
     needs: changes
-    if: needs.changes.outputs.e2e == 'true'
+    # fork: dropped on internal (Linux/Docker only); still runs upstream
+    if: github.repository != 'orq-ai/headroom-internal' && needs.changes.outputs.e2e == 'true'
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -520,7 +524,8 @@ jobs:
 
   macos-native-wrapper:
     needs: changes
-    if: needs.changes.outputs.e2e == 'true'
+    # fork: dropped on internal (Linux/Docker only); still runs upstream
+    if: github.repository != 'orq-ai/headroom-internal' && needs.changes.outputs.e2e == 'true'
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
