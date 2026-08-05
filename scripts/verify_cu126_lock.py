@@ -21,6 +21,7 @@ stdlib-only (tomllib) so the CI lock-guard job needs no `uv sync` / pip install.
 
 import pathlib
 import sys
+
 import tomllib
 
 # The CVE floor that motivates cu126 (see module docstring). Bump alongside the
