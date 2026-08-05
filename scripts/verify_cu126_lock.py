@@ -113,7 +113,9 @@ def main(argv: list[str]) -> None:
     if bad:
         fail(f"CUDA-13 packages present: {bad}")
 
-    print(f"OK: torch {version} from cu126 (>= {'.'.join(map(str, TORCH_FLOOR))}), no CUDA-13 packages")
+    print(
+        f"OK: torch {version} from cu126 (>= {'.'.join(map(str, TORCH_FLOOR))}), no CUDA-13 packages"
+    )
 
 
 if __name__ == "__main__":

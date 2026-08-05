@@ -56,23 +56,29 @@ def test_no_torch_fails(tmp_path: Path):
 
 
 def test_torch_from_pypi_only_fails(tmp_path: Path):
-    r = run(tmp_path, """
+    r = run(
+        tmp_path,
+        """
         [[package]]
         name = "torch"
         version = "2.12.1"
         source = { registry = "https://pypi.org/simple" }
-    """)
+    """,
+    )
     assert r.returncode == 1
     assert "no cu126 torch entry" in r.stderr
 
 
 def test_cpu_wheel_from_cu126_fails(tmp_path: Path):
-    r = run(tmp_path, """
+    r = run(
+        tmp_path,
+        """
         [[package]]
         name = "torch"
         version = "2.12.1+cpu"
         source = { registry = "https://download.pytorch.org/whl/cu126" }
-    """)
+    """,
+    )
     assert r.returncode == 1
     # +cpu has no "+cu" tag, so it's the "no cu126 torch entry" path.
     assert r.stderr
@@ -80,47 +86,62 @@ def test_cpu_wheel_from_cu126_fails(tmp_path: Path):
 
 def test_second_cu130_torch_is_caught(tmp_path: Path):
     """The bypass the review found: a good cu126 torch + a stray cu130 sibling."""
-    r = run(tmp_path, GOOD_LOCK + """
+    r = run(
+        tmp_path,
+        GOOD_LOCK
+        + """
         [[package]]
         name = "torch"
         version = "2.13.0+cu130"
         source = { registry = "https://download.pytorch.org/whl/cu130" }
-    """)
+    """,
+    )
     assert r.returncode == 1
     assert "non-cu126 CUDA torch" in r.stderr
 
 
 def test_below_cve_floor_fails(tmp_path: Path):
     """A valid cu126 wheel that is too old still fails (the CVE-floor reason)."""
-    r = run(tmp_path, """
+    r = run(
+        tmp_path,
+        """
         [[package]]
         name = "torch"
         version = "2.6.0+cu126"
         source = { registry = "https://download.pytorch.org/whl/cu126" }
-    """)
+    """,
+    )
     assert r.returncode == 1
     assert "below the CVE floor" in r.stderr
 
 
 def test_cuda13_suffixed_dep_fails(tmp_path: Path):
-    r = run(tmp_path, GOOD_LOCK + """
+    r = run(
+        tmp_path,
+        GOOD_LOCK
+        + """
         [[package]]
         name = "nvidia-cudnn-cu13"
         version = "9.1.0"
         source = { registry = "https://pypi.org/simple" }
-    """)
+    """,
+    )
     assert r.returncode == 1
     assert "CUDA-13 packages present" in r.stderr
 
 
 def test_cuda13_unsuffixed_transitive_fails(tmp_path: Path):
     """Unsuffixed CUDA-13 transitive (the subtle case the whole-lock scan exists for)."""
-    r = run(tmp_path, GOOD_LOCK + """
+    r = run(
+        tmp_path,
+        GOOD_LOCK
+        + """
         [[package]]
         name = "nvidia-cublas"
         version = "13.0.1"
         source = { registry = "https://pypi.org/simple" }
-    """)
+    """,
+    )
     assert r.returncode == 1
     assert "CUDA-13 packages present" in r.stderr
 
@@ -148,10 +169,13 @@ def test_no_arg_fails(tmp_path: Path):
 @pytest.mark.parametrize("index_key", ["registry", "index"])
 def test_both_source_key_forms(tmp_path: Path, index_key: str):
     """uv may write the index as `registry` (URL) or `index` (named) — match both."""
-    r = run(tmp_path, f"""
+    r = run(
+        tmp_path,
+        f"""
         [[package]]
         name = "torch"
         version = "2.12.1+cu126"
         source = {{ {index_key} = "https://download.pytorch.org/whl/cu126" }}
-    """)
+    """,
+    )
     assert r.returncode == 0, r.stderr
