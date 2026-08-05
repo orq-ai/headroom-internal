@@ -65,6 +65,9 @@ jobs:
   # ---- SAST: CodeQL static analysis ------------------------------------
   codeql:
     name: CodeQL (${{ matrix.language }})
+    # fork: dropped on internal (code is ~95% upstream, already CodeQL-scanned
+    # there); dependency-audit + secret-scan below stay on. Still runs upstream.
+    if: github.repository != 'orq-ai/headroom-internal'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

@@ -2,7 +2,7 @@ name: CI
 
 # Intelligent + parallel pipeline (cutover from the old 4-version matrix):
 #   changes      — paths-filter; skips heavy work for docs-only changes
-#   build-wheel  — compile the Rust ext ONCE (fast `ci` cargo profile), share via artifact
+#   build-wheel  — compile the Rust ext ONCE upstream (internal builds it in test jobs)
 #   lint         — ruff + mypy, once
 #   prefetch-model — download the embedding model ONCE (authenticated), warm shared cache
 #   test         — 4 parallel shards (pytest-split), each a fresh runner VM; run offline
@@ -108,7 +108,8 @@ jobs:
 
   build-wheel:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # fork: dropped on internal (tests build the extension locally); retained upstream
+    if: github.repository != 'orq-ai/headroom-internal' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -159,7 +160,7 @@ jobs:
           echo "::error::could not fetch all-MiniLM-L6-v2 from HuggingFace"; exit 1
 
   test:
-    needs: [changes, build-wheel, prefetch-model]
+    needs: [changes, prefetch-model]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -204,7 +205,14 @@ jobs:
           done
           echo "::error::could not fetch all-MiniLM-L6-v2 from HuggingFace (fallback)"; exit 1
 
+      - name: Build wheel on internal fork
+        if: github.repository == 'orq-ai/headroom-internal'
+        run: |
+          python -m pip install --upgrade pip maturin
+          maturin build --profile ci --out dist --interpreter "python${PY_VERSION}"
+
       - name: Download prebuilt wheel
+        if: github.repository != 'orq-ai/headroom-internal'
         uses: actions/download-artifact@v8
         with:
           name: headroom-wheel
@@ -257,7 +265,7 @@ jobs:
           fail_ci_if_error: false
 
   test-extras:
-    needs: [changes, build-wheel]
+    needs: [changes]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -279,7 +287,14 @@ jobs:
         with:
           path: ${{ github.workspace }}/.fastembed-cache
           key: ${{ runner.os }}-fastembed-bge-small-v1
+      - name: Build wheel on internal fork
+        if: github.repository == 'orq-ai/headroom-internal'
+        run: |
+          python -m pip install --upgrade pip maturin
+          maturin build --profile ci --out dist --interpreter "python${PY_VERSION}"
+
       - name: Download prebuilt wheel
+        if: github.repository != 'orq-ai/headroom-internal'
         uses: actions/download-artifact@v8
         with:
           name: headroom-wheel
@@ -313,7 +328,8 @@ jobs:
 
   test-agno:
     needs: [changes, build-wheel]
-    if: needs.changes.outputs.code == 'true'
+    # fork: dropped on internal (agno integration unused here)
+    if: github.repository != 'orq-ai/headroom-internal' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -339,7 +355,8 @@ jobs:
 
   test-dashboard-ui:
     needs: [changes, build-wheel]
-    if: needs.changes.outputs.code == 'true'
+    # fork: dropped on internal (dashboard UI unused here)
+    if: github.repository != 'orq-ai/headroom-internal' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -393,7 +410,8 @@ jobs:
 
   build:
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # fork: dropped on internal (we deploy via Docker); still runs upstream
+    if: github.repository != 'orq-ai/headroom-internal' && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -503,7 +521,8 @@ jobs:
 
   windows-native-wrapper:
     needs: changes
-    if: needs.changes.outputs.e2e == 'true'
+    # fork: dropped on internal (Linux/Docker only); still runs upstream
+    if: github.repository != 'orq-ai/headroom-internal' && needs.changes.outputs.e2e == 'true'
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -520,7 +539,8 @@ jobs:
 
   macos-native-wrapper:
     needs: changes
-    if: needs.changes.outputs.e2e == 'true'
+    # fork: dropped on internal (Linux/Docker only); still runs upstream
+    if: github.repository != 'orq-ai/headroom-internal' && needs.changes.outputs.e2e == 'true'
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
