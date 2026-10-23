@@ -84,6 +84,12 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
+# NodeSource currently bundles npm 10.9.9, whose Arborist peer-set resolver
+# crashes on the local SDK tarball install exercised by the OpenClaw wrap E2E.
+# npm 11.6.2 handles the same package graph and still supports Node 22.
+RUN npm install --global --no-fund --no-audit npm@11.6.2 && \
+    test "$(npm --version)" = "11.6.2"
+
 WORKDIR /workspace
 
 # Bring in the prebuilt manylinux wheel from stage 1.

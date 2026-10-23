@@ -1,5 +1,7 @@
 """Tests for DeepSeek model pricing and cost estimation."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from headroom.pricing.deepseek_prices import (
@@ -98,49 +100,96 @@ class TestDeepSeekLiteLLMInjection:
         assert "deepseek/deepseek-v4-flash" in litellm.model_cost
         assert "deepseek/deepseek-v4-pro" in litellm.model_cost
 
-    def test_deepseek_v4_flash_litellm_pricing(self):
-        from headroom.pricing.litellm_pricing import LITELLM_AVAILABLE, litellm
+    def test_injects_fallback_when_upstream_catalog_lacks_models(self, monkeypatch):
+        import headroom.pricing.litellm_pricing as lp
 
-        if not LITELLM_AVAILABLE:
-            pytest.skip("litellm not available")
-        flash = litellm.model_cost["deepseek-v4-flash"]
-        assert flash["input_cost_per_token"] == 0.14 / 1_000_000
-        assert flash["output_cost_per_token"] == 0.28 / 1_000_000
-        assert flash["cache_read_input_token_cost"] == 0.0028 / 1_000_000
-        assert flash["litellm_provider"] == "deepseek"
+        fake_litellm = SimpleNamespace(model_cost={})
+        monkeypatch.setattr(lp, "LITELLM_AVAILABLE", True)
+        monkeypatch.setattr(lp, "litellm", fake_litellm)
+        lp._inject_deepseek_pricing()
 
-    def test_deepseek_v4_pro_litellm_pricing(self):
-        from headroom.pricing.litellm_pricing import LITELLM_AVAILABLE, litellm
-
-        if not LITELLM_AVAILABLE:
-            pytest.skip("litellm not available")
-        pro = litellm.model_cost["deepseek-v4-pro"]
-        assert pro["input_cost_per_token"] == 0.435 / 1_000_000
-        assert pro["output_cost_per_token"] == 0.87 / 1_000_000
-        assert pro["cache_read_input_token_cost"] == 0.003625 / 1_000_000
-        assert pro["litellm_provider"] == "deepseek"
-
-    def test_cost_per_token_resolves_deepseek_v4_flash(self):
-        from headroom.pricing.litellm_pricing import (
-            LITELLM_AVAILABLE,
-            litellm,
-            resolve_litellm_model,
+        assert (
+            fake_litellm.model_cost["deepseek-v4-flash"]
+            is lp._DEEPSEEK_V4_PRICING["deepseek-v4-flash"]
+        )
+        assert (
+            fake_litellm.model_cost["deepseek-v4-pro"] is lp._DEEPSEEK_V4_PRICING["deepseek-v4-pro"]
+        )
+        assert (
+            fake_litellm.model_cost["deepseek/deepseek-v4-flash"]
+            is lp._DEEPSEEK_V4_PRICING["deepseek-v4-flash"]
         )
 
-        if not LITELLM_AVAILABLE:
-            pytest.skip("litellm not available")
-        # resolve_litellm_model adds the deepseek/ prefix so that
-        # litellm.cost_per_token can determine the provider via
-        # get_llm_provider(). Bare model names without a provider prefix
-        # would fail with BadRequestError.
-        resolved = resolve_litellm_model("deepseek-v4-flash")
-        input_cost, output_cost = litellm.cost_per_token(
+    def test_upstream_catalog_prices_are_not_overwritten(self, monkeypatch):
+        import headroom.pricing.litellm_pricing as lp
+
+        upstream_bare = {"input_cost_per_token": 0.3 / 1_000_000, "source": "upstream"}
+        upstream_prefixed = {"input_cost_per_token": 0.3001 / 1_000_000, "source": "upstream"}
+        fake_litellm = SimpleNamespace(
+            model_cost={
+                "deepseek-v4-flash": upstream_bare,
+                "deepseek/deepseek-v4-flash": upstream_prefixed,
+            }
+        )
+        monkeypatch.setattr(lp, "LITELLM_AVAILABLE", True)
+        monkeypatch.setattr(lp, "litellm", fake_litellm)
+        lp._inject_deepseek_pricing()
+
+        assert fake_litellm.model_cost["deepseek-v4-flash"] is upstream_bare
+        assert fake_litellm.model_cost["deepseek/deepseek-v4-flash"] is upstream_prefixed
+
+    def test_cost_per_token_uses_prefixed_upstream_model(self, monkeypatch):
+        import headroom.pricing.litellm_pricing as lp
+
+        catalog = {
+            "deepseek/deepseek-v4-flash": {
+                "input_cost_per_token": 0.3 / 1_000_000,
+                "output_cost_per_token": 1.2 / 1_000_000,
+            }
+        }
+
+        def cost_per_token(*, model, prompt_tokens, completion_tokens, **kwargs):
+            info = catalog[model]
+            return (
+                prompt_tokens * info["input_cost_per_token"],
+                completion_tokens * info["output_cost_per_token"],
+            )
+
+        fake_litellm = SimpleNamespace(model_cost=catalog, cost_per_token=cost_per_token)
+        monkeypatch.setattr(lp, "LITELLM_AVAILABLE", True)
+        monkeypatch.setattr(lp, "litellm", fake_litellm)
+        monkeypatch.setattr(lp, "_resolved_model_cache", {})
+
+        resolved = lp.resolve_litellm_model("deepseek-v4-flash")
+        assert resolved == "deepseek/deepseek-v4-flash"
+        assert fake_litellm.cost_per_token(
             model=resolved,
             prompt_tokens=1_000_000,
             completion_tokens=1_000_000,
+        ) == pytest.approx((0.3, 1.2))
+
+    def test_resolver_ignores_bare_catalog_entry_when_sdk_requires_prefix(self, monkeypatch):
+        import headroom.pricing.litellm_pricing as lp
+
+        catalog = {
+            "deepseek-v4-flash": {"input_cost_per_token": 0.3 / 1_000_000},
+            "deepseek/deepseek-v4-flash": {"input_cost_per_token": 0.3 / 1_000_000},
+        }
+
+        def cost_per_token(*, model, **kwargs):
+            if model == "deepseek/deepseek-v4-flash":
+                return (0.0000003, 0.0000012)
+            raise ValueError("DeepSeek models need the provider prefix")
+
+        monkeypatch.setattr(lp, "LITELLM_AVAILABLE", True)
+        monkeypatch.setattr(
+            lp,
+            "litellm",
+            SimpleNamespace(model_cost=catalog, cost_per_token=cost_per_token),
         )
-        assert input_cost == pytest.approx(0.14, rel=0.01)
-        assert output_cost == pytest.approx(0.28, rel=0.01)
+        monkeypatch.setattr(lp, "_resolved_model_cache", {})
+
+        assert lp.resolve_litellm_model("deepseek-v4-flash") == "deepseek/deepseek-v4-flash"
 
     def test_resolve_litellm_model_prefixes_deepseek(self):
         from headroom.pricing.litellm_pricing import resolve_litellm_model

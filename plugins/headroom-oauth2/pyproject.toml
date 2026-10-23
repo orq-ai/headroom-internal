@@ -27,7 +27,7 @@ classifiers = [
 [project.optional-dependencies]
 # Only needed if you set HEADROOM_OAUTH2_HEADERS (static upstream headers via litellm.headers).
 # The token-minting + injection path is standard-library only and needs none of this.
-litellm = ["litellm>=1.40"]
+litellm = ["litellm>=1.106.2"]
 dev = ["pytest>=7", "ruff"]
 test = ["pytest>=7"]
 

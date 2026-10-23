@@ -152,38 +152,11 @@ def _normalize_model(value: Any) -> str:
 
 def _resolve_litellm_model(model: str) -> str:
     """Resolve model name to one LiteLLM recognizes."""
-    litellm = _get_litellm_module()
-    if litellm is None:
+    if _get_litellm_module() is None:
         return model
+    from headroom.pricing.litellm_pricing import resolve_litellm_model
 
-    try:
-        litellm.cost_per_token(model=model, prompt_tokens=1, completion_tokens=0)
-        return model
-    except Exception:
-        pass
-
-    prefixes = {
-        "claude-": "anthropic/",
-        "gpt-": "openai/",
-        "o1-": "openai/",
-        "o3-": "openai/",
-        "o4-": "openai/",
-        "gemini-": "google/",
-    }
-    for pattern, prefix in prefixes.items():
-        if model.startswith(pattern):
-            candidate = f"{prefix}{model}"
-            try:
-                litellm.cost_per_token(
-                    model=candidate,
-                    prompt_tokens=1,
-                    completion_tokens=0,
-                )
-                return candidate
-            except Exception:
-                break
-
-    return model
+    return resolve_litellm_model(model)
 
 
 def _estimate_compression_savings_usd(model: str, tokens_saved: int) -> float:

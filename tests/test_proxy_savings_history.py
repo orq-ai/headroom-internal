@@ -310,6 +310,17 @@ def test_litellm_resolution_and_savings_estimation_fallbacks(monkeypatch):
     monkeypatch.setattr(savings_tracker_module, "LITELLM_AVAILABLE", True)
     monkeypatch.setattr(savings_tracker_module, "litellm", fake_litellm)
 
+    from headroom.pricing import litellm_pricing
+
+    monkeypatch.setattr(
+        litellm_pricing,
+        "resolve_litellm_model",
+        lambda model: {
+            "gpt-4o": "gpt-4o",
+            "claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
+        }.get(model, model),
+    )
+
     assert savings_tracker_module._resolve_litellm_model("gpt-4o") == "gpt-4o"
     assert (
         savings_tracker_module._resolve_litellm_model("claude-sonnet-4-6")
