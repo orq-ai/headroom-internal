@@ -41,8 +41,8 @@ _MODEL_ALIASES: dict[str, str] = {
     # Claude 3.5 Sonnet retired Feb 2026; pricing remains equivalent to Sonnet 4.
     "claude-3-5-sonnet-20241022": "claude-sonnet-4-5",
     "claude-3-5-sonnet-20240620": "claude-sonnet-4-5",
-    # Claude 3 Sonnet retired
-    "claude-3-sonnet-20240229": "claude-3-haiku-20240307",
+    # Claude 3 Sonnet's $3/$15 per MTok rates match current Sonnet pricing.
+    "claude-3-sonnet-20240229": "claude-sonnet-4-5",
 }
 
 _resolved_model_cache: dict[str, str] = {}

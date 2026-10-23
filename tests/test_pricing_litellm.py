@@ -128,6 +128,34 @@ def test_litellm_pricing_aliases_removed_claude_sonnet_key(monkeypatch) -> None:
         assert pricing.output_cost_per_1m == 15.0
 
 
+def test_legacy_claude_3_sonnet_alias_preserves_sonnet_rates(monkeypatch) -> None:
+    model_cost = {
+        "claude-sonnet-4-5": {
+            "input_cost_per_token": 0.000003,
+            "output_cost_per_token": 0.000015,
+        }
+    }
+
+    def cost_per_token(*, model, **kwargs):
+        if model == "claude-sonnet-4-5":
+            return (0.000003, 0.000015)
+        raise ValueError("unknown model")
+
+    monkeypatch.setattr(litellm_pricing, "LITELLM_AVAILABLE", True)
+    monkeypatch.setattr(
+        litellm_pricing,
+        "litellm",
+        SimpleNamespace(model_cost=model_cost, cost_per_token=cost_per_token),
+    )
+    monkeypatch.setattr(litellm_pricing, "_resolved_model_cache", {})
+
+    assert litellm_pricing.resolve_litellm_model("claude-3-sonnet-20240229") == "claude-sonnet-4-5"
+    pricing = litellm_pricing.get_model_pricing("claude-3-sonnet-20240229")
+    assert pricing is not None
+    assert pricing.input_cost_per_1m == 3.0
+    assert pricing.output_cost_per_1m == 15.0
+
+
 @pytest.mark.parametrize(
     ("catalog", "expected_input_price"),
     [
