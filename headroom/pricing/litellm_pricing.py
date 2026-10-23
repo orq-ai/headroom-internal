@@ -36,9 +36,11 @@ except ImportError:
 # Aliases for models removed from LiteLLM's cost database (retired/renamed).
 # Maps old model name -> current LiteLLM key that has equivalent pricing.
 _MODEL_ALIASES: dict[str, str] = {
-    # Claude 3.5 Sonnet retired Feb 2026, pricing same as claude-sonnet-4-20250514
-    "claude-3-5-sonnet-20241022": "claude-sonnet-4-20250514",
-    "claude-3-5-sonnet-20240620": "claude-sonnet-4-20250514",
+    # LiteLLM retired the dated Sonnet 4 key; Sonnet 4.5 has the same standard rates.
+    "claude-sonnet-4-20250514": "claude-sonnet-4-5",
+    # Claude 3.5 Sonnet retired Feb 2026; pricing remains equivalent to Sonnet 4.
+    "claude-3-5-sonnet-20241022": "claude-sonnet-4-5",
+    "claude-3-5-sonnet-20240620": "claude-sonnet-4-5",
     # Claude 3 Sonnet retired
     "claude-3-sonnet-20240229": "claude-3-haiku-20240307",
 }
@@ -54,7 +56,12 @@ def resolve_litellm_model(model: str) -> str:
     if model in _resolved_model_cache:
         return _resolved_model_cache[model]
     resolved = _resolve_litellm_model_uncached(model)
-    _resolved_model_cache[model] = resolved
+    # Do not cache unresolved names: LiteLLM's catalog can change while the
+    # process is running, and a cached miss would keep costs at zero forever.
+    if resolved != model or not LITELLM_AVAILABLE:
+        _resolved_model_cache[model] = resolved
+    elif _litellm_model_has_pricing(model):
+        _resolved_model_cache[model] = resolved
     return resolved
 
 
@@ -62,12 +69,11 @@ def _resolve_litellm_model_uncached(model: str) -> str:
     """Uncached resolution — called once per unique model name."""
     if not LITELLM_AVAILABLE:
         return model
-    # Try as-is first
-    try:
-        litellm.cost_per_token(model=model, prompt_tokens=1, completion_tokens=0)
+    # Try as-is first. Recent LiteLLM versions return (0, 0) for unknown
+    # names instead of raising, so an exception-only check accepts missing
+    # models and makes budget tracking silently record no cost.
+    if _litellm_model_has_pricing(model):
         return model
-    except Exception:
-        pass
     # Try with provider prefix
     prefixes = {
         "claude-": "anthropic/",
@@ -81,12 +87,46 @@ def _resolve_litellm_model_uncached(model: str) -> str:
     for pattern, prefix in prefixes.items():
         if model.startswith(pattern):
             prefixed = f"{prefix}{model}"
-            try:
-                litellm.cost_per_token(model=prefixed, prompt_tokens=1, completion_tokens=0)
+            if _litellm_model_has_pricing(prefixed):
                 return prefixed
-            except Exception:
-                break
+            break
+    # Older Anthropic identifiers are no longer always present in LiteLLM's
+    # catalog. Use only explicitly documented, equivalent-price aliases after
+    # checking both the original bare and provider-prefixed model names.
+    alias_model = model.removeprefix("anthropic/")
+    alias = _MODEL_ALIASES.get(alias_model)
+    if alias:
+        alias_candidates = (
+            [f"anthropic/{alias}", alias]
+            if model.startswith("anthropic/")
+            else [alias, f"anthropic/{alias}"]
+        )
+        for alias_candidate in alias_candidates:
+            if _litellm_model_has_pricing(alias_candidate):
+                return alias_candidate
     return model
+
+
+def _litellm_model_has_pricing(model: str) -> bool:
+    """Return whether LiteLLM recognizes a model and can price a token."""
+    try:
+        input_cost, output_cost = litellm.cost_per_token(
+            model=model,
+            prompt_tokens=1,
+            completion_tokens=0,
+        )
+    except Exception:
+        return False
+    if input_cost or output_cost:
+        return True
+    # LiteLLM returns zeros for both unknown model names and genuinely free
+    # catalog entries. The catalog distinguishes those cases after the SDK
+    # has confirmed it can process this model form.
+    model_cost = getattr(litellm, "model_cost", {})
+    try:
+        return model in model_cost
+    except TypeError:
+        return False
 
 
 @dataclass
@@ -134,6 +174,10 @@ def get_model_pricing(model: str) -> LiteLLMModelPricing | None:
     # Try exact match first
     info = cost_data.get(model)
 
+    # A provider-prefixed request may correspond to a bare catalog key.
+    if info is None and model.startswith("anthropic/"):
+        info = cost_data.get(model.removeprefix("anthropic/"))
+
     # Try common provider prefixes if not found
     if info is None:
         for prefix in ["openai/", "anthropic/", "google/", "mistral/", "deepseek/"]:
@@ -143,9 +187,11 @@ def get_model_pricing(model: str) -> LiteLLMModelPricing | None:
 
     # Try retired/renamed model aliases (LiteLLM removes old model keys over time)
     if info is None:
-        alias = _MODEL_ALIASES.get(model)
+        alias = _MODEL_ALIASES.get(model.removeprefix("anthropic/"))
         if alias:
             info = cost_data.get(alias)
+            if info is None:
+                info = cost_data.get(f"anthropic/{alias}")
 
     if info is None:
         return None
