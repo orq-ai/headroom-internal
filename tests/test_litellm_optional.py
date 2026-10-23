@@ -1,9 +1,7 @@
-"""litellm must be optional on Python 3.14 (GH #956).
+"""LiteLLM stays optional on Python 3.14 until its integration path is validated (GH #956).
 
-litellm's metadata pins requires-python <3.14, so a hard dependency makes
-`pip install headroom-ai` unsatisfiable on 3.14. headroom only uses litellm for
-model registry / pricing / non-core providers (all lazily imported and
-ImportError-guarded), so every litellm requirement must carry a marker that
+Headroom only uses LiteLLM for model registry / pricing / non-core providers (all lazily
+imported and ImportError-guarded), so every LiteLLM requirement must carry a marker that
 skips it on 3.14, and the core paths must degrade gracefully without it.
 """
 
